@@ -1,0 +1,7 @@
+file1.csv
+file2.csv
+file3.csv
+file4.csv
+file5.csv
+file6_bad.csv
+file9_bad.csv
