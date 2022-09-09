@@ -19,6 +19,7 @@ import (
 	"time"
 )
 
+// user is the fully parsed & validated object we're interested in.
 type user struct {
 	first string
 	last  string
@@ -29,13 +30,16 @@ func (u user) String() string {
 	return fmt.Sprintf("%s %s %d", u.first, u.last, u.age)
 }
 
+// -------------------
+
+// payload is the result of reading, parsing, and validating an input file.
 type payload struct {
-	url      url.URL
-	users    []user
-	numBad   int
-	err      error
-	canRetry bool
-	elapsed  time.Duration
+	url      url.URL       // where did it come from?
+	users    []user        // which users are in this file?
+	numBad   int           // how many bad user rows did we experience?
+	err      error         // was there an error parsing this url?
+	canRetry bool          // was there a retryable error (mainly for the httpFetcher)
+	elapsed  time.Duration // how long did it take to parse this file?
 }
 
 func (p payload) String() string {
@@ -48,6 +52,9 @@ func (p payload) String() string {
 	return fmt.Sprintf("%s %d users (%d skipped) elapsed:%s", p.url.String(), len(p.users), p.numBad, p.elapsed.String())
 }
 
+// -------------------
+
+// parseCSV takes raw bytes and returns separate fields (including headers)
 func parseCSV(data []byte) ([][]string, error) {
 	r := csv.NewReader(bytes.NewReader(data))
 
@@ -57,6 +64,8 @@ func parseCSV(data []byte) ([][]string, error) {
 	}
 	return csv, nil
 }
+
+// ------------------- Fetchers
 
 // fetcher is the signature for a method that can read a file from a location.
 // We can make different fetchers for different sources.
@@ -95,7 +104,7 @@ func makePayload(url url.URL, b []byte) payload {
 	return payload{url: url, users: users, numBad: nbad}
 }
 
-// httpFetcher returns a payload from
+// httpFetcher returns a payload from an HTTP source
 func httpFetcher(url url.URL) payload {
 	r, err := http.Get(url.String())
 	if err != nil {
@@ -116,6 +125,7 @@ func httpFetcher(url url.URL) payload {
 	return payload{url: url, err: errors.New(fmt.Sprintf("unable to load file (status code %d)", r.StatusCode))}
 }
 
+// fileFetcher reads a file from a file:// source
 func fileFetcher(url url.URL) payload {
 	b, err := os.ReadFile(fmt.Sprintf("%s/%s", url.Host, url.Path))
 	if err != nil {
@@ -135,8 +145,11 @@ func urlFetcher(url url.URL) payload {
 	return payload{url: url, err: errors.New(fmt.Sprintf("unknown url scheme: %s", url.Scheme))}
 }
 
+// ------------------- Worker code
+
+// results is where we store payloads that come in from the workers. It must be thread safe.
 type results struct {
-	payloads map[string]payload
+	payloads map[string]payload // map[url string]payload
 	mtx      sync.Mutex
 }
 
@@ -147,6 +160,7 @@ func (r *results) add(p payload, e time.Duration) {
 	r.payloads[p.url.String()] = p
 }
 
+// worker handles the processing of a single url by a given fetcher
 func worker(id int, todo chan url.URL, wg *sync.WaitGroup, f fetcher, r *results) {
 	defer wg.Done()
 
@@ -207,15 +221,19 @@ func fetch(urls []url.URL, f fetcher, poolSize int) ([]payload, time.Duration) {
 			log.Println(len(remaining), "retryable urls left - cycling again")
 		}
 	}
+
+	// don't let errors go unnoticed
 	for _, v := range r.payloads {
 		if v.err != nil {
 			log.Println("skipping", v.url.String(), ":", v.err)
 		}
 	}
 
+	// include the total elapsed time
 	return final, time.Since(now)
 }
 
+// loadIndex reads the url index file
 func loadIndex(index string) []url.URL {
 	readFile, err := os.Open(index)
 	defer readFile.Close()
@@ -235,6 +253,7 @@ func loadIndex(index string) []url.URL {
 	return files
 }
 
+// merge will convert each payload file into a single list of users
 func merge(payloads []payload) []user {
 	u := []user{}
 	for _, p := range payloads {
@@ -243,6 +262,7 @@ func merge(payloads []payload) []user {
 	return u
 }
 
+// summarize will compute the median and mean age of the users and find all of the median age.
 func summarize(u []user) {
 	log.Println(len(u), "users")
 	if len(u) == 0 {
@@ -258,7 +278,7 @@ func summarize(u []user) {
 	sort.Ints(ages)
 	mean := int(float64(t) / float64(n))
 	log.Println("mean", mean)
-	mid := int(math.Ceil(float64(n) / float64(2)))
+	mid := int(math.Ceil(float64(n) / float64(2))) // if even, we could take the fencepost average.
 	if mid < len(ages) {
 		median := ages[mid]
 		log.Println("median", median, "users:")
@@ -270,14 +290,19 @@ func summarize(u []user) {
 	}
 }
 
+// main ... let's do this!
 func main() {
 	files := loadIndex("index.txt")
 	poolSize := 3
 	payloads, elapsed := fetch(files, urlFetcher, poolSize)
 	log.Println(len(payloads), "files read in", elapsed, "(poolsize", poolSize, ")")
+
+	// the final validated payload list
 	for _, p := range payloads {
 		log.Println(p)
 	}
+
+	// this is what we came here for ...
 	users := merge(payloads)
 	summarize(users)
 }
